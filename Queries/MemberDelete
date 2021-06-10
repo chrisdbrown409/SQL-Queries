@@ -1,0 +1,282 @@
+/**************************************************************************************************
+Purpose:    Delete data loaded by Member Conversion and/or 834 by file name
+
+Date        User            Change
+---------------------------------------------------------------------------------------------
+06/11/2019 DK Original script
+06/13/2019 DK Reordered the Effectuation table deleted to happen before the EC delete
+---------------------------------------------------------------------------------------------
+
+SELECT * FROM Elig_Load_Run_Log -- To find the filename to delete
+***************************************************************************************************/
+SET NOCOUNT ON
+
+DECLARE @commit CHAR(1) = 'Y'
+       ,@filename VARCHAR(100) = '300-TestCase-801.txt'
+       ,@filename25 VARCHAR(25)
+  ,@transaction_count INT
+  ,@table_name VARCHAR(255)
+  ,@sql VARCHAR(4000)
+
+-- The user_id_created field is only 25 characters, so not all of the filename will be stored
+SET @filename25 = @filename
+--SELECT @filename25
+
+IF OBJECT_ID('tempdb.dbo.#tables') IS NOT NULL
+DROP TABLE #tables
+
+CREATE TABLE #tables
+      (table_name VARCHAR(255))
+
+INSERT INTO #tables(table_name) VALUES ('Eligibility_Coverage')
+INSERT INTO #tables(table_name) VALUES ('Demographics')
+INSERT INTO #tables(table_name) VALUES ('Contact_Relation')
+INSERT INTO #tables(table_name) VALUES ('Contacts')
+INSERT INTO #tables(table_name) VALUES ('PCP_Assignment')
+INSERT INTO #tables(table_name) VALUES ('Funding_Relation')
+INSERT INTO #tables(table_name) VALUES ('Card_Print')
+INSERT INTO #tables(table_name) VALUES ('Member_Salary')
+INSERT INTO #tables(table_name) VALUES ('Member_Ancillary')
+INSERT INTO #tables(table_name) VALUES ('Member_Verification')
+INSERT INTO #tables(table_name) VALUES ('Entity_Paid_Thru')
+
+IF OBJECT_ID('tempdb.dbo.#edi_tables') IS NOT NULL
+DROP TABLE #edi_tables
+
+CREATE TABLE #edi_tables
+      (table_name VARCHAR(255))
+
+INSERT INTO #edi_tables
+      (table_name)
+SELECT T.name
+  FROM sys.tables T
+ WHERE T.name LIKE 'edi834%'
+
+IF OBJECT_ID('tempdb.dbo.#table_counts') IS NOT NULL
+DROP TABLE #table_counts
+
+CREATE TABLE #table_counts
+      (table_name VARCHAR(255)
+ ,records INT
+ ,results VARCHAR(100))
+
+IF OBJECT_ID('tempdb.dbo.#transactions') IS NOT NULL
+DROP TABLE #transactions
+
+CREATE TABLE #transactions
+      (transaction_id NUMERIC(28,0))
+
+INSERT INTO #transactions
+      (transaction_id)
+SELECT DISTINCT RL.transaction_id
+  FROM Elig_Load_Run_Log RL
+ WHERE RL.file_name = @filename
+
+--************************************************************************************************
+-- Loop through the membership tables to find data that should be deleted
+--************************************************************************************************
+DECLARE table_cursor CURSOR FOR
+SELECT table_name
+  FROM #tables
+
+OPEN table_cursor
+FETCH NEXT FROM table_cursor INTO @table_name
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+
+SET @sql = 'INSERT INTO #table_counts
+                 (table_name
+ ,records
+ ,results)
+   SELECT ''' + @table_name + ''' AS TableName
+     ,COUNT(*) AS Count
+ ,CASE WHEN ''' + @commit + ''' = ''Y'' THEN ''Deleted'' ELSE ''Not Deleted'' END
+             FROM [' + @table_name + ']
+WHERE user_id_created LIKE ''' + @filename25 + ''''
+EXEC (@sql)
+
+FETCH NEXT FROM table_cursor INTO @table_name
+END
+
+CLOSE table_cursor
+DEALLOCATE table_cursor
+
+--************************************************************************************************
+-- Loop through the EDI tables to find data that should be deleted
+--************************************************************************************************
+DECLARE edi_table_cursor CURSOR FOR
+SELECT table_name
+  FROM #edi_tables
+
+OPEN edi_table_cursor
+FETCH NEXT FROM edi_table_cursor INTO @table_name
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+
+SET @sql = 'INSERT INTO #table_counts
+                 (table_name
+ ,records
+ ,results)
+   SELECT ''' + @table_name + ''' AS TableName
+     ,COUNT(*) AS Count
+ ,CASE WHEN ''' + @commit + ''' = ''Y'' THEN ''Deleted'' ELSE ''Not Deleted'' END
+     FROM [' + @table_name + '] X
+ JOIN #transactions T
+   ON X.transaction_id = T.transaction_id'
+EXEC (@sql)
+
+FETCH NEXT FROM edi_table_cursor INTO @table_name
+END
+
+CLOSE edi_table_cursor
+DEALLOCATE edi_table_cursor
+
+--************************************************************************************************
+-- Get counts of data to delete from special tables (Effectuation tables)
+--************************************************************************************************
+INSERT INTO #table_counts
+      (table_name
+ ,records
+ ,results)
+SELECT 'Effectuation_BLOB_Storage' AS table_name
+ ,COUNT(*) AS records
+ ,CASE WHEN @commit = 'Y' THEN 'Deleted'
+       ELSE 'Not Deleted'
+END
+  FROM Eligibility_Coverage EC
+  JOIN Effectuation_BLOB_Storage BS
+    ON EC.child_gid = BS.child_gid
+   AND EC.parent_gid = BS.parent_gid
+ WHERE EC.user_id_created = @filename25
+   AND EC.record_status = 'A'
+
+INSERT INTO #table_counts
+      (table_name
+ ,records
+ ,results)
+SELECT 'Effectuation_Transaction_BLOB_Storage' AS table_name
+ ,COUNT(*) AS records
+ ,CASE WHEN @commit = 'Y' THEN 'Deleted'
+       ELSE 'Not Deleted'
+END
+  FROM Eligibility_Coverage EC
+  JOIN Effectuation_BLOB_Storage BS
+    ON EC.child_gid = BS.child_gid
+   AND EC.parent_gid = BS.parent_gid
+  JOIN Effectuation_Transaction_BLOB_Storage TBS
+    ON BS.parent_guid =TBS.guid
+ WHERE EC.user_id_created = @filename25
+   AND EC.record_status = 'A'
+
+INSERT INTO #table_counts
+      (table_name
+ ,records
+ ,results)
+SELECT 'Elig_Load_Run_Log'
+      ,COUNT(*)
+ ,CASE WHEN @commit = 'Y' THEN 'Deleted'
+       ELSE 'Not Deleted'
+END
+  FROM Elig_Load_Run_Log
+ WHERE file_name = @filename
+--*************************************************************************************************
+-- If @commit is Y then do the acutal delete
+--*************************************************************************************************
+IF @commit = 'Y'
+BEGIN
+
+BEGIN TRY
+
+BEGIN TRANSACTION
+
+-- Delete data from Effectuation tables since they require the EC table to find the records to delete
+DELETE TBS
+ FROM Eligibility_Coverage EC
+ JOIN Effectuation_BLOB_Storage BS
+ON EC.child_gid = BS.child_gid
+  AND EC.parent_gid = BS.parent_gid
+ JOIN Effectuation_Transaction_BLOB_Storage TBS
+ON BS.parent_guid =TBS.guid
+WHERE EC.user_id_created = @filename25
+  AND EC.record_status = 'A'
+
+DELETE BS
+ FROM Eligibility_Coverage EC
+ JOIN Effectuation_BLOB_Storage BS
+ON EC.child_gid = BS.child_gid
+  AND EC.parent_gid = BS.parent_gid
+WHERE EC.user_id_created = @filename25
+  AND EC.record_status = 'A'
+
+-- Loop through membership tables and delete the data
+DECLARE table_cursor CURSOR FOR
+SELECT table_name
+  FROM #tables
+
+OPEN table_cursor
+FETCH NEXT FROM table_cursor INTO @table_name
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+
+SET @sql = 'DELETE FROM [' + @table_name + '] WHERE user_id_created LIKE ''' + @filename25 + ''''
+EXEC (@sql)
+
+FETCH NEXT FROM table_cursor INTO @table_name
+END
+
+CLOSE table_cursor
+DEALLOCATE table_cursor
+
+-- Loop through EDI work tables and delete the data
+DECLARE edi_table_cursor CURSOR FOR
+SELECT table_name
+  FROM #edi_tables
+
+OPEN edi_table_cursor
+FETCH NEXT FROM edi_table_cursor INTO @table_name
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+
+SET @sql = 'DELETE X
+            FROM [' + @table_name + '] X
+JOIN #transactions T
+              ON X.transaction_id = T.transaction_id'
+EXEC (@sql)
+
+FETCH NEXT FROM edi_table_cursor INTO @table_name
+END
+
+CLOSE edi_table_cursor
+DEALLOCATE edi_table_cursor
+
+-- Finally, delete data from the Elig_Load_RunLog
+DELETE ERL
+ FROM Elig_Load_Run_Log ERL
+WHERE ERL.file_name = @filename
+
+COMMIT TRANSACTION
+
+END TRY
+BEGIN CATCH
+
+ROLLBACK TRANSACTION
+SELECT  'An error occured while deleting data. Error: ' + ERROR_MESSAGE() AS [Error Message]
+
+UPDATE #table_counts
+  SET results = 'Not Deleted'
+
+END CATCH
+
+END
+
+--*************************************************************************************************
+-- Show results
+--*************************************************************************************************
+SELECT *
+  FROM #table_counts
+ WHERE records > 0
+ ORDER BY table_name
