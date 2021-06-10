@@ -1,0 +1,183 @@
+DECLARE @DIRECTORYLOCATION AS VARCHAR(150)
+
+DECLARE @SITEURL              AS VARCHAR(150)
+
+ 
+
+SET @DIRECTORYLOCATION = ''  --ENTER THE DIRECTORY ROOT
+
+SET @SITEURL            = ''  --ENTER THE URL
+
+ 
+
+CREATE TABLE #DBCHECK
+
+(      DATAPOINT        VARCHAR(150) NOT NULL
+
+       ,DATAPOINTVALUE VARCHAR(150) NOT NULL
+
+       ,RESULT                    VARCHAR(150) NOT NULL
+
+)
+
+ 
+
+/*GET THE DATABASE REFRESH DATE*/
+
+       INSERT INTO #DBCHECK
+
+       SELECT TOP (1)       'DATABASE REFRESH DATE',
+
+                                  'REFRESHED ON: '+CAST([rs].[restore_date] AS VARCHAR(101)) as refresh_date,
+
+                                  'REFRESH DATA DATE: '+CAST([bs].[backup_finish_date] AS VARCHAR(101))
+
+       FROM msdb..restorehistory rs
+
+       INNER JOIN msdb..backupset bs
+
+       ON [rs].[backup_set_id] = [bs].[backup_set_id]
+
+       INNER JOIN msdb..backupmediafamily bmf
+
+       ON [bs].[media_set_id] = [bmf].[media_set_id]
+
+       WHERE [rs].[destination_database_name]=DB_NAME()
+
+       ORDER BY [rs].[restore_date] DESC
+
+ 
+
+ 
+
+/*GET THE NET SHARE DIRECTORY*/
+
+       INSERT INTO #DBCHECK
+
+       SELECT 'SHARE DIRECTORY'
+
+                     ,VARIABLE_VALUE
+
+                     ,CASE WHEN variable_value NOT LIKE @DIRECTORYLOCATION+'%' THEN 'FAIL: DIRECTORY INCORRECT' ELSE 'PASS' END
+
+       FROM dbo.Global_Params
+
+       WHERE variable_name = '%Batch_NetShare%'
+
+ 
+
+/*GET THE BATCH ROOT*/
+
+       INSERT INTO #DBCHECK
+
+       SELECT 'BATCH ROOT DIRECTORY'
+
+                     ,VARIABLE_VALUE
+
+                     ,CASE WHEN variable_value NOT LIKE @DIRECTORYLOCATION+'%' THEN 'FAIL: DIRECTORY INCORRECT' ELSE 'PASS' END
+
+       FROM dbo.Global_Params
+
+       WHERE variable_name = '%BATCHROOT%'
+
+ 
+
+/*GET THE DB CONNECTION STRING*/
+
+       INSERT INTO #DBCHECK
+
+       SELECT 'SERVER NAME'
+
+                     ,VARIABLE_VALUE
+
+                     ,CASE WHEN variable_value <> @@SERVERNAME THEN 'FAIL: SERVER NAME INCORRECT' ELSE 'PASS' END
+
+       FROM dbo.Global_Params
+
+       WHERE variable_name = '%DBConnstring%'
+
+ 
+
+/*GET THE DB NAME*/
+
+       INSERT INTO #DBCHECK
+
+       SELECT 'DATABASE NAME'
+
+                     ,VARIABLE_VALUE
+
+                     ,CASE WHEN variable_value <> DB_NAME() THEN 'FAIL: DATABASE NAME INCORRECT' ELSE 'PASS' END
+
+       FROM dbo.Global_Params
+
+       WHERE variable_name = '%DBName%'
+
+      
+
+/*GET THE INTEGRATION SERVICE URL*/
+
+       INSERT INTO #DBCHECK
+
+       SELECT 'INTEGRATION URL'
+
+                     ,VARIABLE_VALUE
+
+                     ,CASE WHEN variable_value NOT LIKE @SITEURL+'%' THEN 'FAIL: INTEGRATION URL INCORRECT' ELSE 'PASS' END
+
+       FROM dbo.Global_Params
+
+       WHERE variable_name = 'AlderaWebServiceURL'
+
+ 
+
+/*CHECK TO SEE IF THERE ARE RUNNING JOBS*/
+
+       INSERT INTO #DBCHECK
+
+       SELECT TOP(1)  'RUNNING JOBS'
+
+                             --Use this format when you need to use a WHERE and you expect no data. This will ensure you see in the result that the value was tested.
+
+                             ,CASE WHEN (SELECT TOP 1 1 FROM dbo.Batch_Job_History WHERE completion_code='101' AND record_status='a')=1 --when there's an active job with 101 code,
+
+                                      THEN (SELECT TOP 1 user_job_id FROM dbo.Batch_Job_History WHERE completion_code='101' AND record_status='a') --then show me the job id
+
+                                         ELSE 'NOTHING RUNNING'  END --other wise print 'nothing running'
+
+                             ,CASE WHEN (SELECT TOP 1 1 FROM dbo.Batch_Job_History WHERE completion_code='101' AND record_status='a')=1 --when there's an active job with 101 code,
+
+                                         THEN 'FAIL: JOBS RUNNING' --then print 'fail:jobs running
+
+                                         ELSE 'PASS' END --other wise print 'pass'
+
+       FROM dbo.Batch_Job_History
+
+ 
+
+ 
+
+--/*ADD A NEW VALUE TEMPLATE*/
+
+--     INSERT INTO #DBCHECK
+
+--     SELECT '' --<Enter the valur you want to see in the DATAPOINT column
+
+--                   ,VARIABLE_VALUE --<Enter the column for the value you're checking.
+
+--                   ,CASE WHEN variable_value NOT LIKE @SITEURL+'%' --<Enter the value you expect, using "not equals" or "not like" (i.e. <>A, NOT LIKE 'good%')
+
+--                         THEN 'FAIL: INTEGRATION URL INCORRECT' --<Enter the failure message you want to see in the RESULT column
+
+--                           ELSE 'PASS' END
+
+--     FROM dbo.Global_Params
+
+--     WHERE variable_name = 'AlderaWebServiceURL' --<You only need a WHERE for global value checks, see line 71-81 for in-line selects using CASE/WHEN statements
+
+                    
+
+SELECT * FROM #DBCHECK
+
+ 
+
+DROP TABLE #DBCHECK
